@@ -1,6 +1,7 @@
 use actix_web::{web, HttpResponse, Responder, HttpRequest};
 use serde::Deserialize;
 use rayon::prelude::*;
+use percent_encoding::percent_decode_str;
 
 use crate::doc_store::DocumentStoreLock;
 use crate::index::IndexStore;
@@ -15,8 +16,7 @@ use crate::models::new_doc_id;
 use chrono::Utc;
 
 #[derive(Debug, Deserialize)]
-pub struct DocListQuery {
-    pub tag: Option<Vec<String>>,
+pub struct DocListQueryBase {
     pub author: Option<String>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
@@ -24,14 +24,18 @@ pub struct DocListQuery {
 
 pub async fn list_docs(
     data: web::Data<DocumentStoreLock>,
-    query: web::Query<DocListQuery>,
+    query: web::Query<DocListQueryBase>,
+    req: HttpRequest,
 ) -> impl Responder {
+    let tags = parse_multi_query_param(req.query_string(), "tag");
+
     let store = data.store.read();
-    let docs: Vec<Document> = match (&query.tag, &query.author) {
-        (Some(tags), Some(author)) => store.filter_by_tags_and_author(tags, author),
-        (Some(tags), None) => store.filter_by_tags(tags),
-        (None, Some(author)) => store.filter_by_author(author),
-        (None, None) => store.get_all(),
+
+    let docs: Vec<Document> = match (!tags.is_empty(), &query.author) {
+        (true, Some(author)) => store.filter_by_tags_and_author(&tags, author),
+        (true, None) => store.filter_by_tags(&tags),
+        (false, Some(author)) => store.filter_by_author(author),
+        (false, None) => store.get_all(),
     };
 
     let limit = query.limit.unwrap_or(20);
@@ -39,6 +43,21 @@ pub async fn list_docs(
     let paginated: Vec<Document> = docs.into_iter().skip(offset).take(limit).collect();
 
     HttpResponse::Ok().json(paginated)
+}
+
+fn parse_multi_query_param(query_str: &str, param_name: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let prefix = format!("{}=", param_name);
+
+    for pair in query_str.split('&') {
+        if let Some(rest) = pair.strip_prefix(&prefix) {
+            if let Ok(decoded) = percent_decode_str(rest).decode_utf8() {
+                values.push(decoded.into_owned());
+            }
+        }
+    }
+
+    values
 }
 
 pub async fn get_doc(
